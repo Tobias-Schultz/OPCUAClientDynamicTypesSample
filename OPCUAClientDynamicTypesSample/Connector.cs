@@ -147,25 +147,37 @@ namespace OPCUAClientDynamicTypesSample
             }
 
             // Fetch the description of the custom namespaces via the OPCBinarySchema_TypeSystem Node and decode it.
-            var binaryTypeData = new List<DataValue>();
-            var stringTypeData = new List<string>();
+            List<BinaryEncodingInformation> lEncodings = new List<BinaryEncodingInformation>();
             var binaryTypeNode = _session.ReadNode(ObjectIds.OPCBinarySchema_TypeSystem);
             var referenceTypeNodes = _session.FetchReferences(binaryTypeNode.NodeId).Where(d => d.IsForward && d.NodeClass == NodeClass.Variable);
             foreach (var referenceDescription in referenceTypeNodes)
             {
-                binaryTypeData.Add(_session.ReadValue(ExpandedNodeId.ToNodeId(referenceDescription.NodeId, _session.NamespaceUris)));
-            }
-            foreach (var byteValue in binaryTypeData)
-            {
-                stringTypeData.Add(Encoding.ASCII.GetString((byte[])byteValue.Value));
+                BinaryEncodingInformation binaryInfo = new BinaryEncodingInformation();
+                binaryInfo.NodeId =  ExpandedNodeId.ToNodeId(referenceDescription.NodeId, _session.NamespaceUris);
+                binaryInfo.Name = referenceDescription.BrowseName;
+
+                DataValue byteValue = _session.ReadValue(binaryInfo.NodeId);
+                
+                binaryInfo.TypeDictionaryXml = Encoding.ASCII.GetString((byte[])byteValue.Value);
+
+                lEncodings.Add(binaryInfo);
             }
 
             // Parse the decoded namespace descriptions and create types on base of the informations and the encoded node ids.
-            // Skip default opc namespace.
-            for (var i = 1; i < stringTypeData.Count; i++)
+            foreach(BinaryEncodingInformation info in lEncodings)
             {
-                var typeData = stringTypeData[i];
+                if(info.NodeId.NamespaceIndex == 0)
+                {
+                    // Skip default opc namespace.
+                    continue;
+                }
+
+                var typeData = info.TypeDictionaryXml;
                 var xmlDocument = new XmlDocument();
+#if DEBUG
+                xmlDocument.PreserveWhitespace = true;
+#endif
+
                 xmlDocument.LoadXml(typeData);
 
                 // Create enums (which might be used for the types later)
@@ -177,10 +189,11 @@ namespace OPCUAClientDynamicTypesSample
                         {
                             if (subchild.LocalName.Equals(EnumeratedTypeString))
                             {
-                                var name = new QualifiedName(subchild.Attributes[NameString]?.Value, 3);
-                                if (foundCustomTypes.ContainsKey(name))
+                                var name = new QualifiedName(subchild.Attributes[NameString]?.Value, info.NodeId.NamespaceIndex);
+                                NodeId encodingId;
+
+                                if (foundCustomTypes.TryGetValue(name, out encodingId))
                                 {
-                                    var encodingId = foundCustomTypes[name];
                                     var enumBuilder = moduleBuilder.DefineEnum(name.Name, TypeAttributes.Public, typeof(int));
                                     if (subchild.HasChildNodes)
                                     {
@@ -197,6 +210,10 @@ namespace OPCUAClientDynamicTypesSample
                                     var newType = enumBuilder.CreateTypeInfo();
                                     _createdTypeDictionary.Add(encodingId, newType);
                                 }
+                                else
+                                {
+                                    Console.WriteLine("Unknown type: " + name);
+                                }
                             }
                         }
                     }
@@ -211,10 +228,11 @@ namespace OPCUAClientDynamicTypesSample
                         {
                             if (subchild.LocalName.Equals(StructuredTypeString))
                             {
-                                var name = new QualifiedName(subchild.Attributes[NameString]?.Value, 3);
-                                if (foundCustomTypes.ContainsKey(name))
+                                var name = new QualifiedName(subchild.Attributes[NameString]?.Value, info.NodeId.NamespaceIndex);
+                                NodeId encodingId;
+
+                                if (foundCustomTypes.TryGetValue(name, out encodingId))
                                 {
-                                    var encodingId = foundCustomTypes[name];
                                     var typeBuilder = moduleBuilder.DefineType(name.Name, TypeAttributes.Public | TypeAttributes.Class, typeof(GenericEncodeable));
                                     typeBuilder.AddInterfaceImplementation(typeof(IEncodeable));
                                     BuildDynamicProperty(typeBuilder, NodeIdString, typeof(uint), (uint)encodingId.Identifier);
@@ -280,6 +298,10 @@ namespace OPCUAClientDynamicTypesSample
                                     var createdType = typeBuilder.CreateType();
                                     _createdTypeDictionary.Add(encodingId, createdType);
                                     _session.Factory.AddEncodeableType(encodingId, createdType);
+                                }
+                                else
+                                {
+                                    Console.WriteLine("Unknown type: " + name);
                                 }
                             }
                         }
@@ -397,6 +419,7 @@ namespace OPCUAClientDynamicTypesSample
             };
 
             _appConfig = await application.LoadApplicationConfiguration(false);
+            _appConfig.CertificateValidator.CertificateValidation += OnCertificateValidation;
             var appCertificate = _appConfig.SecurityConfiguration.ApplicationCertificate.Certificate;
             if (appCertificate == null)
             {
@@ -428,7 +451,7 @@ namespace OPCUAClientDynamicTypesSample
 
         private static void OnCertificateValidation(CertificateValidator sender, CertificateValidationEventArgs e)
         {
-            throw new NotImplementedException();
+            e.Accept = true;
         }
 
     }
